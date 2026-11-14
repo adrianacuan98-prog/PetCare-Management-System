@@ -1,0 +1,140 @@
+import os
+from datetime import date, datetime
+from decimal import Decimal
+from flask import Flask, render_template, request, redirect, url_for, flash, abort
+import pyodbc
+from dotenv import load_dotenv
+
+load_dotenv()
+app = Flask(__name__)
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'development-only-change-me')
+
+TABLES = {
+    'owners': {'table':'Owner','pk':'OwnerID','title':'Owners','fields':[('OwnerID','Owner ID','number'),('Fname','First name','text'),('Lname','Last name','text'),('PhoneNum','Phone number','text'),('EAddress','Email address','email')], 'parents':{}},
+    'pets': {'table':'Pet','pk':'PetID','title':'Pets','fields':[('PetID','Pet ID','number'),('Bdate','Birth date','date'),('Species','Species','text'),('PetName','Pet name','text'),('OwnerID','Owner','select'),('Breed','Breed','text')], 'parents':{'OwnerID':('Owner','OwnerID',"CONCAT(Fname, ' ', Lname)")}},
+    'appointments': {'table':'Appointment','pk':'AppointmentId','title':'Appointments','fields':[('AppointmentId','Appointment ID','number'),('PetID','Pet','select'),('VetID','Veterinarian','select'),('AppointmentDate','Appointment date','date'),('AppointmentTime','Appointment time','datetime-local'),('Reason','Reason','text'),('Status','Status','text')], 'parents':{'PetID':('Pet','PetID','PetName'),'VetID':('Veterinarian','VetID','VetName')}}
+}
+
+def connect():
+    required = ['AZURE_SQL_SERVER','AZURE_SQL_DATABASE','AZURE_SQL_USERNAME','AZURE_SQL_PASSWORD']
+    missing = [k for k in required if not os.environ.get(k)]
+    if missing: raise RuntimeError('Missing .env settings: ' + ', '.join(missing))
+    return pyodbc.connect('DRIVER={ODBC Driver 18 for SQL Server};SERVER=tcp:'+os.environ['AZURE_SQL_SERVER']+',1433;DATABASE='+os.environ['AZURE_SQL_DATABASE']+';UID='+os.environ['AZURE_SQL_USERNAME']+';PWD='+os.environ['AZURE_SQL_PASSWORD']+';Encrypt=yes;TrustServerCertificate=no;Connection Timeout=15;')
+
+def query(sql, params=()):
+    with connect() as db:
+        cur=db.cursor(); cur.execute(sql,params)
+        if cur.description:
+            names=[x[0] for x in cur.description]
+            return [dict(zip(names,row)) for row in cur.fetchall()]
+        db.commit(); return []
+
+def options(config):
+    result={}
+    for field,(table,pk,label) in config['parents'].items():
+        result[field]=query(f'SELECT [{pk}] AS id, {label} AS label FROM dbo.[{table}] ORDER BY label')
+    return result
+
+def form_values(config):
+    values=[]
+    for name,_,kind in config['fields']:
+        raw=request.form.get(name,'').strip()
+        if not raw: raise ValueError(f'{name} is required')
+        if kind in ('number', 'select'):
+            values.append(int(raw))
+        elif kind == 'date':
+            from datetime import date
+            values.append(date.fromisoformat(raw))
+        elif kind == 'datetime-local':
+            from datetime import datetime
+            values.append(datetime.fromisoformat(raw))
+        else:
+            values.append(raw)
+    return values
+
+@app.route('/')
+def home():
+    return render_template('home.html', tables=TABLES)
+
+@app.route('/<resource>')
+def listing(resource):
+    config=TABLES.get(resource)
+    if not config: abort(404)
+    records=query(f'SELECT * FROM dbo.[{config["table"]}] ORDER BY [{config["pk"]}]')
+    return render_template('list.html',config=config,resource=resource,records=records)
+
+@app.route('/<resource>/new',methods=['GET','POST'])
+def create(resource):
+    config=TABLES.get(resource)
+    if not config: abort(404)
+    if request.method=='POST':
+        try:
+            values=form_values(config)
+            cols=[f[0] for f in config['fields']]
+            placeholders=', '.join('?' for _ in cols)
+            query(f'INSERT INTO dbo.[{config["table"]}] ({", ".join("["+c+"]" for c in cols)}) VALUES ({placeholders})',values)
+            flash('Record created successfully.','success'); return redirect(url_for('listing',resource=resource))
+        except (ValueError,pyodbc.Error) as e: flash(f'Could not create record: {e}','error')
+    return render_template('form.html',config=config,resource=resource,record={},choices=options(config),action='Create')
+
+@app.route('/<resource>/<int:record_id>/edit',methods=['GET','POST'])
+def edit(resource,record_id):
+    config=TABLES.get(resource)
+    if not config: abort(404)
+    found=query(f'SELECT * FROM dbo.[{config["table"]}] WHERE [{config["pk"]}]=?',(record_id,))
+    if not found: abort(404)
+    record=found[0]
+    if request.method=='POST':
+        try:
+            editable=[f for f in config['fields'] if f[0]!=config['pk']]
+            vals=[]
+            for name,_,kind in editable:
+                raw=request.form.get(name,'').strip()
+                if not raw: raise ValueError(f'{name} is required')
+                if kind in ('number', 'select'):
+                    vals.append(int(raw))
+                elif kind == 'date':
+                    from datetime import date
+                    vals.append(date.fromisoformat(raw))
+                elif kind == 'datetime-local':
+                    from datetime import datetime
+                    vals.append(datetime.fromisoformat(raw))
+                else:
+                    vals.append(raw)
+            assignments=', '.join(f'[{f[0]}]=?' for f in editable)
+            query(f'UPDATE dbo.[{config["table"]}] SET {assignments} WHERE [{config["pk"]}]=?',vals+[record_id])
+            flash('Record updated successfully.','success');return redirect(url_for('listing',resource=resource))
+        except (ValueError,pyodbc.Error) as e: flash(f'Could not update record: {e}','error')
+    return render_template('form.html',config=config,resource=resource,record=record,choices=options(config),action='Update')
+
+@app.route('/<resource>/<int:record_id>/delete',methods=['GET','POST'])
+def delete(resource,record_id):
+    config=TABLES.get(resource)
+    if not config: abort(404)
+    found=query(f'SELECT * FROM dbo.[{config["table"]}] WHERE [{config["pk"]}]=?',(record_id,))
+    if not found: abort(404)
+    if request.method=='POST':
+        try:
+            query(f'DELETE FROM dbo.[{config["table"]}] WHERE [{config["pk"]}]=?',(record_id,))
+            flash('Record deleted.','success');return redirect(url_for('listing',resource=resource))
+        except pyodbc.IntegrityError:
+            flash('Cannot delete this record because another table references it. Delete dependent records first.','error')
+            return redirect(url_for('listing',resource=resource))
+        except pyodbc.Error as e:
+            flash(f'Could not delete record: {e}','error');return redirect(url_for('listing',resource=resource))
+    return render_template('delete.html',config=config,resource=resource,record=found[0])
+
+@app.template_filter('display')
+def display(v):
+    if isinstance(v,datetime):return v.strftime('%Y-%m-%d %H:%M')
+    if isinstance(v,date):return v.isoformat()
+    if isinstance(v,Decimal):return str(v)
+    return '' if v is None else str(v)
+
+@app.template_filter('formdate')
+def formdate(v):
+    if isinstance(v,datetime):return v.strftime('%Y-%m-%dT%H:%M')
+    if isinstance(v,date):return v.isoformat()
+    return v or ''
+
+if __name__=='__main__': app.run(debug=os.environ.get('FLASK_DEBUG')=='1')
