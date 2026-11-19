@@ -1,0 +1,22 @@
+<h1>Pet Activity Log</h1>
+
+<form method="get">
+  <label for="order">Sort by date</label>
+  <select id="order" name="order">
+    <option value="newest" {% if order != "oldest" %}selected{% endif %}>
+      Newest first
+    </option>
+    <option value="oldest" {% if order == "oldest" %}selected{% endif %}>
+      Oldest first
+    </option>
+  </select>
+  <button type="submit">Apply</button>
+</form>
+
+<ul>
+  {% for event in events %}
+    <li>{{ event.timestamp }} — {{ event.eventtype }} — Pet #{{ event.petid }}</li>
+  {% else %}
+    <li>No activity found.</li>
+  {% endfor %}
+</ul>

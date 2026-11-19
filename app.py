@@ -3,11 +3,14 @@ from datetime import date, datetime
 from decimal import Decimal
 from flask import Flask, render_template, request, redirect, url_for, flash, abort
 import pyodbc
+from pymongo import MongoClient
 from dotenv import load_dotenv
 
 load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'development-only-change-me')
+mongo_uri = os.getenv("MONGODB_URI")
+mongo_client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000) if mongo_uri else None
 
 TABLES = {
     'owners': {'table':'Owner','pk':'OwnerID','title':'Owners','fields':[('OwnerID','Owner ID','number'),('Fname','First name','text'),('Lname','Last name','text'),('PhoneNum','Phone number','text'),('EAddress','Email address','email')], 'parents':{}},
@@ -136,5 +139,18 @@ def formdate(v):
     if isinstance(v,datetime):return v.strftime('%Y-%m-%dT%H:%M')
     if isinstance(v,date):return v.isoformat()
     return v or ''
+
+@app.route("/pet-activity")
+def pet_activity():
+    if mongo_client is None:
+        abort(503, description="Set MONGODB_URI in your local .env file.")
+
+    order = request.args.get("order", "newest")
+    direction = 1 if order == "oldest" else -1
+
+    collection = mongo_client["Petcare"]["pet_activity"]
+    events = list(collection.find({}).sort("timestamp", direction))
+
+    return render_template("pet_activity.html", events=events, order=order)
 
 if __name__=='__main__': app.run(debug=os.environ.get('FLASK_DEBUG')=='1')
